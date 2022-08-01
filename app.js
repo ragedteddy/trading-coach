@@ -4,7 +4,7 @@ const ejs = require("ejs");
 const mongoose = require("mongoose");
 const cookieParser = require("cookie-parser");
 const sessions = require('express-session');
-const request = require('request');
+const { default: axios } = require("axios");
 
 const app = express();
 app.set('view engine', 'ejs');
@@ -22,31 +22,46 @@ let session = { userId: "" };
 let ticker = { "google": "GOOGL", "apple": "AAPL", "amazon": "AMZN", "tesla": "TSLA", "facebook": "FB", "microsoft": "MSFT" };
 let fmpcloudkey = "b3d8ca901af3919e96dc0dce4d7aff6c";
 
+const stringToHashConversion = (string) => {
+    var hashVal = 0;
+    if (string.length == 0) return hashVal;
+    for (i = 0; i < string.length; i++) {
+        char = string.charCodeAt(i);
+        hashVal = ((hashVal << 5) - hashVal) + char;
+        hashVal = hashVal & hashVal;
+    }
+    return hashVal;
+}
+
 const getResult = (fratings, fratios) => {
-    let result = {}
-    result['dcfscore'] = fratings[0]["ratingDetailsDCFScore"];
-    result['roascore'] = fratings[0]["ratingDetailsROAScore"];
-    result['roescore'] = fratings[0]["ratingDetailsROEScore"];
-    result['pbscore'] = fratings[0]["ratingDetailsPBScore"];
-    result['pescore'] = fratings[0]["ratingDetailsPEScore"];
-    result['descore'] = fratings[0]["ratingDetailsDEScore"];
-    let a = 0;
-    for (const score in result) {
-        a += result[score];
-    }
-    if (!fratios[0]["dividendYield"]) {
-        result['dyscore'] = 0;
-        result["total"] = a / 6;
+    try {
+        let result = {};
+        result['dcfscore'] = fratings[0]["ratingDetailsDCFScore"];
+        result['roascore'] = fratings[0]["ratingDetailsROAScore"];
+        result['roescore'] = fratings[0]["ratingDetailsROEScore"];
+        result['pbscore'] = fratings[0]["ratingDetailsPBScore"];
+        result['pescore'] = fratings[0]["ratingDetailsPEScore"];
+        result['descore'] = fratings[0]["ratingDetailsDEScore"];
+        let a = 0;
+        for (const score in result) {
+            a += result[score];
+        }
+        if (!fratios[0]["dividendYield"]) {
+            result['dyscore'] = 0;
+            result["total"] = a / 6;
+            return result;
+        }
+        let avgdy = 0;
+        fratios.map((x) => {
+            avgdy += x["dividendYield"] / fratios.length;
+        })
+        result['dyscore'] = 20 * (1 - Math.min((fratios[0]["dividendYield"]) / avgdy, 1));
+        result["total"] = (a * (80 / 30) + result['dyscore']) * .05;
+        result["total"] = result["total"] * 0.7 + fratings[0]["ratingScore"] * 0.3;
         return result;
+    } catch {
+        return "error"
     }
-    let avgdy = 0;
-    fratios.map((x) => {
-        avgdy += x["dividendYield"] / fratios.length;
-    })
-    result['dyscore'] = 20 * (1 - Math.min((fratios[0]["dividendYield"]) / avgdy, 1));
-    result["total"] = (a * (80 / 30) + result['dyscore']) * .05;
-    result["total"] = result["total"] * 0.7 + fratings[0]["ratingScore"] * 0.3;
-    return result;
 }
 
 //Home Page
@@ -60,7 +75,7 @@ app.get("/register", function(req, res) {
 });
 app.post("/register", function(req, res) {
     const username = req.body.username;
-    const password = req.body.password;
+    let password = req.body.password;
     let message = "";
     let category = "";
     if (username.length == 0 || password.length < 8) {
@@ -69,7 +84,8 @@ app.post("/register", function(req, res) {
     } else {
         let duplicateUser = false;
         let duplicateUserName = false;
-        //hash the password and check in database
+        password = stringToHashConversion(password);
+        //check the username and password in database
         if (duplicateUser) {
             message = 'Already regisgtered ! Please sign in.';
             category = 'primary';
@@ -91,12 +107,13 @@ app.get("/signin", function(req, res) {
 });
 app.post("/signin", function(req, res) {
     const username = req.body.username;
-    const password = req.body.password;
+    let password = req.body.password;
     let message = "";
     let category = "";
     let validUser = false;
 
-    //hash the password and check if it's there in the database
+    password = stringToHashConversion(password);
+    //check if the password is there in the database
 
     if (!validUser) {
         message = 'Wrong email or password !';
@@ -116,39 +133,26 @@ app.get("/stocks", function(req, res) {
 });
 
 // Particular Stock Info
-app.get("/stocks/:stockname", function(req, res) {
+app.get("/stocks/:stockname", async function(req, res) {
     let stockname = req.params.stockname;
     if (!session.userId.length) {
         if (session.result) {
             let result = session.result;
             res.render("stockinfo", { data: "nody", stockname, result });
-        }
-        let status;
-        let fratios;
-        let fratings;
-        request('https://fmpcloud.io/api/v3/ratios/' + ticker[stockname] + '?limit=6&apikey=' + fmpcloudkey, function(error, response, body) {
-            if (!error && response.statusCode == 200) {
-                fratios = JSON.parse(response.body);
-            } else {
-                status = "error";
-            }
-        });
-        request('https://fmpcloud.io/api/v3/historical-rating/' + ticker[stockname] + '?limit=6&apikey=' + fmpcloudkey, function(error, response, body) {
-            if (!error && response.statusCode == 200) {
-                fratings = JSON.parse(response.body);
-            } else {
-                status = "error";
-            }
-        });
-        setTimeout(() => {
-            if (status != "error") {
-                let result = getResult(fratings, fratios);
+        } else {
+            let fratios = await axios('https://fmpcloud.io/api/v3/ratios/' + ticker[stockname] + '?limit=6&apikey=' + fmpcloudkey);
+            let fratings = await axios('https://fmpcloud.io/api/v3/historical-rating/' + ticker[stockname] + '?limit=6&apikey=' + fmpcloudkey);
+            fratios = fratios.data;
+            fratings = fratings.data;
+
+            let result = getResult(fratings, fratios);
+            if (result != "error") {
                 session.result = result;
                 res.render("stockinfo", { data: "nody", stockname, result });
             } else {
                 res.render("stocks", { user: session.userId, message: "Something went wrong!" });
             }
-        }, 3000);
+        }
     } else {
         res.render("stocks", { user: session.userId, message: "Please Sign In first to see Stock Data" });
     }
